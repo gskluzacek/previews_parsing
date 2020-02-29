@@ -163,7 +163,8 @@ import mysql.connector
 #       other_designations
 
 
-cof_dir = '/Users/gregskluzacek/Documents/Development/github_repos/previews_parsing/cof_files'
+# cof_dir = '/Users/gregskluzacek/Documents/Development/github_repos/previews_parsing/cof_files'
+cof_dir = '/Users/gskluzacek/Documents/GitHub/previews_parsing/cof_files'
 
 
 def main():
@@ -404,8 +405,151 @@ def convert_files_encoding() -> int:
     return 0
 
 
+def set_pv_type() -> int:
+    db_conn = get_db_conn()
+    curs = db_conn.cursor()
+    sql_stmt = """
+        with
+        last_item as (
+            select
+                pvh_id,
+                max(pvl_seq) as last_item_seq
+            from previews_lines
+            where line_text like '%\t%\t%'
+            group by pvh_id
+        ),
+        ident_lines as (
+            select
+                pvh_id,
+                ident_line
+            from previews_hdr
+            where ident_typ <> 40
+            and raw_ident is not null
+        ), 
+        pv_type_calc as (
+            select
+                t1.pvl_id,
+                t1.pvh_id,
+                case
+                    when t4.pvh_id is not null         then 'IDENT'
+                    when t1.line_text = ''             then 'BLANK'
+                    when t1.line_text like '%\t%\t%'   then 'ITEM'
+                    when t1.line_text like 'PAGE%'     then 'PAGE'
+                    when t1.pvl_seq > t3.last_item_seq then 'JUNK'
+                    else 'HDG'
+                end as pv_type_calced,
+                t2.proc_sts
+            from previews_lines t1
+            join previews_hdr t2
+            on t2.pvh_id = t1.pvh_id
+            join last_item t3
+            on t3.pvh_id = t1.pvh_id
+            left join ident_lines t4
+            on t4.pvh_id = t1.pvh_id
+            and t4.ident_line = t1.pvl_seq
+        )
+        update previews_lines as pl
+        join pv_type_calc as ptc
+        on ptc.pvl_id = pl.pvl_id
+        set pl.pv_type = ptc.pv_type_calced
+        where ptc.proc_sts = 'LOADED';
+    """
+    curs.execute(sql_stmt)
+
+    sql_stmt = """
+        with
+        pv_type_not_assgnd as (
+            select distinct
+            pvh_id
+            from previews_lines
+            where pv_type is NULL
+        )
+        update previews_hdr as ph
+        left join pv_type_not_assgnd as ptna
+        on ptna.pvh_id = ph.pvh_id
+        set ph.proc_sts = 'TYPED'
+        where ph.proc_sts = 'LOADED'
+        and ptna.pvh_id is NULL;
+    """
+    curs.execute(sql_stmt)
+    db_conn.commit()
+    curs.close()
+    db_conn.close()
+
+    return 0
+
+
+def set_page_nbr():
+    db_conn = get_db_conn()
+    curs = db_conn.cursor()
+    sql_stmt = """
+        with
+        pages as (
+            select
+                pvh_id,
+                pvl_seq,
+                line_text
+            from previews_lines
+            where pv_type = 'PAGE'
+        ),
+        max_lines as (
+            select
+                pvh_id,
+                max(pvl_seq) as max_line
+            from previews_lines
+            group by pvh_id
+        ),
+        page_ranges as (
+            select
+                t1.pvh_id,
+                t1.pvl_seq as start_line,
+                ifnull(lead(t1.pvl_seq) over(partition by t1.pvh_id order by t1.pvl_seq) - 1, t2.max_line)  as end_line,
+                substr(t1.line_text, 6) + 0 as pg_nbr
+            from pages as t1
+            join max_lines as t2 on t2.pvh_id = t1.pvh_id
+        ),
+        page_nbr_calced as (
+            select
+                t1.pvl_id,
+                ifnull(t3.pg_nbr, 0) as pg_nbr,
+                t2.proc_sts
+            from previews_lines as t1
+            join previews_hdr t2
+            on t1.pvh_id = t2.pvh_id
+            left join page_ranges as t3
+            on t1.pvh_id = t3.pvh_id
+            and t1.pvl_seq between t3.start_line and t3.end_line
+        )
+        update previews_lines as t1
+        join page_nbr_calced as t2
+        on t2.pvl_id = t1.pvl_id
+        set t1.pg_nbr = t2.pg_nbr
+        where t2.proc_sts = 'TYPED';
+    """
+    curs.execute(sql_stmt)
+
+    sql_stmt = """
+        with
+        page_not_assgnd as (
+            select distinct
+            pvh_id
+            from previews_lines
+            where pg_nbr is NULL
+        )
+        update previews_hdr as ph
+        left join page_not_assgnd as pna
+        on pna.pvh_id = ph.pvh_id
+        set ph.proc_sts = 'PAGED'
+        where ph.proc_sts = 'TYPED'
+        and pna.pvh_id is NULL;
+    """
+    curs.execute(sql_stmt)
+    db_conn.commit()
+    curs.close()
+    db_conn.close()
+
 def db_tut():
-    db_conn = mysql.connector.connect(user='root', password='root', host='127.0.0.1', database='previews')
+    db_conn = mysql.connector.connect(user='root', password='dothedew', host='localhost', database='previews')
     curs = db_conn.cursor(dictionary=True)
     curs.execute("UPDATE pvhh_seq SET id=LAST_INSERT_ID(id+1);")
     pvhh_id = curs.lastrowid
@@ -417,7 +561,7 @@ def db_tut():
 
 def get_db_conn() -> mysql.connector:
     db_conn = mysql.connector.connect(
-        user='root', password='root', host='127.0.0.1', database='previews'
+        user='root', password='dothedew', host='127.0.0.1', database='previews'
     )
     return db_conn
 
@@ -425,4 +569,6 @@ def get_db_conn() -> mysql.connector:
 if __name__ == '__main__':
     # sys.exit(convert_files_encoding())
     # sys.exit(log_cof_files())
-    sys.exit(load_line())
+    # sys.exit(load_line())
+    # sys.exit(set_pv_type())
+    sys.exit(set_page_nbr())

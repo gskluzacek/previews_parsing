@@ -1,4 +1,6 @@
-CREATE DATABASE `previews` DEFAULT CHARACTER SET utf8mb4 collate utf8mb4_0900_as_cs;
+CREATE DATABASE if not exists `previews` CHARACTER SET utf8mb4 collate utf8mb4_0900_as_cs;
+
+use previews;
 
 CREATE TABLE `previews_hdg_hrch` (
   `pvhh_tid` int(11) NOT NULL AUTO_INCREMENT,
@@ -35,6 +37,7 @@ CREATE TABLE `previews_lines` (
   `pvl_id` bigint(20) NOT NULL AUTO_INCREMENT,
   `pvh_id` int(11) NOT NULL,
   `pvl_seq` int(11) NOT NULL,
+  `pv_type` varchar(50) DEFAULT NULL,
   `line_text` varchar(1000) NOT NULL,
   PRIMARY KEY (`pvl_id`),
   UNIQUE KEY `previews_lines_pvh_id_pvl_seq_uindex` (`pvh_id`,`pvl_seq`)
