@@ -2,6 +2,7 @@ import os
 import sys
 import re
 from datetime import date
+from datetime import datetime
 
 import codecs
 from chardet.universaldetector import UniversalDetector
@@ -121,6 +122,12 @@ import mysql.connector
 #       heading_name
 #
 #   previews_raw
+#       [ call this table previews_dtl instead and I think it should just contain ITEM lines ]
+#       [ that are COMIC BOOKS. leave out the columns that are parsed from the SOL_TEXT      ]
+#       [ also try to incorporate as some of the other columns back to the previews_lines    ]
+#       [ table, like: pv_type, sol_page, heading columns, (keep pvl_id) get rid of PVH_ID,  ]
+#       [ pv_seq, etc.                                                                       ]
+#
 #       pvr_id              [  PK  ]
 #       pvh_id              [  FK -- previews_hdr  ]
 #       pv_seq              [  incremented for each line processed  ]
@@ -162,9 +169,83 @@ import mysql.connector
 #       edition
 #       other_designations
 
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#           notes on headings hierarchy resolution from the legacy code
+# # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
+#
+# it appears that all lines read from the previews_lines table were inserted into the previews_raw
+#       table.
+#
+# header columns / variables
+#   - pv_source
+#   - h1_pvhl_id
+#   - h2_pvhl_id
+#   - h3_pvhl_id
+#
+# accumulator variables
+#   - h1_id             - hdg_1
+#   - h2_id             - hdg_2
+#   - h3_id             - hdg_3
+#
+# in each iteration of the previews_lines loop the heading columns variables are reset to NULL
+# however the variables used to determine the values of the heading columns are not, they act
+#   as accumulator type variables collecting the values as the lines are processed (in sequence)
+# only under certain conditions are the accumulator variables assigned to the heading column variables
+#
+# here's how the accumulator variables are set.
+#
+# when H1 is found
+#   $hdg_1 & $h1_id are set and
+#   level 2 is set to null
+#   level 3 is set to null
+# when H2 is found
+#   $hdg_1 & $h1_id are left unchanged and
+#   $hdg_2 & $h2_id are set and
+#   level 3 is set to null
+# when H3 is found
+#   $hdg_1 & $h1_id are left unchanged and
+#   $hdg_2 & $h2_id are left unchanged and
+#   $hdg_3 & $h3_id are set and
+#
+# the path (aka pv_source) is determined as follows:
+# $src1 = isset($hdg_1) ? " / $hdg_1" : ''
+# $src2 = isset($hdg_2) ? " / $hdg_2" : ''
+# $src3 = isset($hdg_3) ? " / $hdg_3" : ''
+# pv_source = $src1 . $src2 . $src3
+#
+# an ITEM is assigned whatever headings are in affect at that point in the sequence of lines.
+#   that would be a source (path) and N number of heading level ids (PVHL_ID)
+# a HEADING is not assigned a source (path) but is assigned N number of head level ids (PVHL_ID)
+#   that are in affect at the point in the sequence of lines
+# no other line types are assigned heading column values.
+
+# the $heading_levels data structure
+#
+# in the legacy code, the data structure was only used in conduction with the override_pvhl_id
+#       column on the preview_lines table and was used to set the: hdg_1, hdg_2 & hdg_3 and h1_id,
+#       h2_id & h3_id variables.
+#
+# the data structure is a dictionary object, where the primary dictionary key is the PVHL_ID
+#       to the PREVIEWS_HDG_LVLS table
+# each primary key will have the following mandatory sub-keys / values
+#       - level
+#       - name
+# the elements for the remaining sub-keys / values will vary on the hierarchy level
+#       - level 1 will only have a [level] number of 1 and the level 1 heading [name]
+#       - level 2 with have a the [level] number of 2 and the level 2 heading [name]
+#         additionally it will have sub-keys of
+#           - [h1_name] with the heading 1 name and
+#           - [h1_id] which will contain the PVHL_ID for the level 1 heading record
+#       - level 3 with have a the [level] number of 3 and the level 3 heading [name]
+#         additionally it will have sub-keys of
+#           - [h2_name] with the heading 2 name and
+#           - [h2_id] which will contain the PVHL_ID for the level 2 heading record
+#           - [h1_name] with the heading 1 name and
+#           - [h1_id] which will contain the PVHL_ID for the level 1 heading record
 
 # cof_dir = '/Users/gregskluzacek/Documents/Development/github_repos/previews_parsing/cof_files'
 cof_dir = '/Users/gskluzacek/Documents/GitHub/previews_parsing/cof_files'
+export_dir = '/Users/gskluzacek/Downloads/hdg_hrch_exports'
 
 
 def main():
@@ -548,6 +629,368 @@ def set_page_nbr():
     curs.close()
     db_conn.close()
 
+
+def resolve_heading_hierarchy(pvh_id):
+    db_conn = get_db_conn()
+    curs_dict = db_conn.cursor(dictionary=True)
+    curs = db_conn.cursor()
+
+    db_conn_work = get_db_conn()
+    curs_dict_work = db_conn_work.cursor(dictionary=True)
+    curs_work = db_conn_work.cursor()
+
+    sql_stmt = "select fn_period from previews_hdr where pvh_id = %(pvh_id)s;"
+    params = {'pvh_id': pvh_id}
+    curs_dict.execute(sql_stmt, params)
+    row = curs_dict.fetchone()
+    if not row:
+        raise Exception(f'could not find file name period for pvh_id: {pvh_id}')
+    fn_period = row['fn_period']
+
+    sql_stmt = "update previews_lines set pvhh_id = NULL where pvh_id = %(pvh_id)s;"
+    params = {'pvh_id': pvh_id}
+    curs_dict_work.execute(sql_stmt, params)
+
+    sql_stmt = """
+        select
+            pvl_id as curr_pvl_id,
+            line_text as curr_hdg
+        from previews_lines
+        where pv_type = 'HDG'
+        and pvh_id = %(pvh_id)s
+        order by pvl_seq;
+    """
+    params = {'pvh_id': pvh_id}
+    curs.execute(sql_stmt, params)
+
+    hrch_srch_stmt = """
+        with recursive hrch (pvhh_id, heading_nm, hrch_level, path) as (
+            select
+                t0.pvhh_id,
+                t0.heading_nm,
+                t0.hrch_level,
+                concat('| ', t0.heading_nm) as path
+            from previews_hdg_hrch t0
+            where t0.parent_pvhh_id = 0
+            and %s between t0.valid_from and t0.valid_to
+            union all
+            select
+                t1.pvhh_id,
+                t1.heading_nm,
+                t1.hrch_level,
+                concat(t2.path, ' | ', t1.heading_nm) as path
+            from previews_hdg_hrch as t1
+            join hrch t2
+            on t2.pvhh_id = t1.parent_pvhh_id
+            where %s between t1.valid_from and t1.valid_to
+        ) 
+        select 
+            pvhh_id, 
+            hrch_level 
+        from hrch
+        where path in ({}) 
+        order by hrch_level desc, path
+        limit 1;
+    """
+
+    curr_path = []
+    curr_lvl = 0
+    for curr_pvl_id, curr_hdg in curs:
+
+        search_for_paths_list = []
+        for hdg_index in range(len(curr_path), -1, -1):
+            path_to_try = curr_path[:hdg_index] + [curr_hdg]
+            search_for_paths_list.append(path_to_try)
+        path_in_list = ['| ' + ' | '.join(hdgs) for hdgs in search_for_paths_list]
+
+        params = [fn_period, fn_period] + path_in_list
+        path_in_placeholders = ', '.join(['%s'] * len(path_in_list))
+        sql_stmt = hrch_srch_stmt.format(path_in_placeholders)
+        curs_work.execute(sql_stmt, params)
+        row = curs_work.fetchone()
+        if not row:
+            print(f'no match found for {curr_pvl_id} {curr_hdg}')
+            continue
+        pvhh_id, hrch_lvl = row
+        print(f'found match {pvhh_id} {hrch_lvl}')
+
+        if hrch_lvl > curr_lvl:
+            curr_path.append(curr_hdg)
+        else:
+            slice_index = hrch_lvl - curr_lvl - 1
+            curr_path = curr_path[:slice_index] + [curr_hdg]
+        curr_lvl = hrch_lvl
+
+        sql_stmt = "update previews_lines set pvhh_id = %(pvhh_id)s where pvl_id = %(curr_pvl_id)s;"
+        params = {'pvhh_id': pvhh_id, 'curr_pvl_id': curr_pvl_id}
+        curs_dict_work.execute(sql_stmt, params)
+
+    db_conn_work.commit()
+    curs_dict_work.close()
+    curs_work.close()
+    db_conn_work.close()
+
+    sql_stmt = """
+        select count(1) as cnt 
+        from previews_lines 
+        where pvh_id = %(pvh_id)s 
+        and pv_type = 'HDG' 
+        and pvhh_id is null;
+    """
+    params = {'pvh_id': pvh_id}
+    curs_dict.execute(sql_stmt, params)
+    row = curs_dict.fetchone()
+    hdgs_not_found_count = row['cnt']
+
+    if hdgs_not_found_count == 0:
+        print(f'All headings were matched for pvh_id: {pvh_id}')
+        return 0
+    print(f'{hdgs_not_found_count} heading were not found... generating extract file')
+
+    sql_stmt = """
+        with row_numbers as (
+            select
+                row_number() over (partition by pvh_id order by pvl_seq) + 1 as row_num,
+                pvh_id,
+                pvl_id,
+                pvl_seq,
+                pg_nbr,
+                pvhh_id,
+                line_text
+            from previews_lines
+            where pv_type = 'HDG'
+        ), valid_hdg_hrc as (
+            select pvhh_id, hrch_level, detail_items_ind 
+            from previews_hdg_hrch 
+            where %(fn_period)s between valid_to and valid_from
+        )
+        select
+            t1.row_num - 1 as row_num,     -- A  A
+            t2.file_name,                  -- B  B
+            t1.pvh_id,                     -- C  C
+            t1.pvl_seq,                    -- D  E
+            t1.pvl_id,                     -- E  D .
+            t1.pg_nbr,                     -- F  F
+            t3.hrch_level as hdg_lvl,      -- G  G .
+            t3.detail_items_ind,           -- H  #     True to parse previews_line rec to previews_dtl rec
+            null as dup_pvl_id,            -- I  H
+            t1.pvhh_id,                    -- J  #     populated if match was found, else null if no match found
+            t1.line_text,                  -- K  I .
+            -- EXCEL formula: if( <hdg_lvl><rn> = "", "", REPT("-", (<hdg_lvl><rn> - 1) * 4) & <line_txt><rn> )
+            concat('=IF(G', row_num, '="","",REPT("-",(G', row_num, '-1)*4)&K', row_num, ')') as indent
+        from row_numbers t1
+        join previews_hdr t2
+        on t2.pvh_id = t1.pvh_id
+        left join previews_hdg_hrch t3
+        on t3.pvhh_id = t1.pvhh_id
+        where t1.pvh_id = %(pvh_id)s
+        order by t1.pvh_id, t1.pvl_seq;
+    """
+    params = {'pvh_id': pvh_id, 'fn_period': fn_period}
+    curs.execute(sql_stmt, params)
+
+    export_fn = export_dir + \
+        '/' + f'hdg_hrch_export_{str(pvh_id).zfill(4)}_{datetime.now().strftime("%Y%m%d%H%M%S")}.txt'
+    with open(export_fn, 'w') as fd:
+        fd.write('row\tfile\tpvh_id\tpvl_seq\tpvl_id\tpg_nbr\thdg_lvl\t'
+                 'DI_ind\tdup_pvl_id\tpvhh_id\theading\tformatted\n')
+        for row in curs:
+            fd.write('\t'.join([str(col or '') for col in row]) + '\n')
+
+    curs_dict.close()
+    curs.close()
+    db_conn.close()
+
+    return 0
+
+
+def import_hdg_hrch_lvls_file(file_name):
+    db_conn = get_db_conn()
+    curs = db_conn.cursor()
+
+    table_nm = f'hdg_hrch_import_{file_name[15:35]}'
+
+    sql_stmt = f"drop table if exists {table_nm};"
+    curs.execute(sql_stmt)
+
+    sql_stmt = f"create table {table_nm} like hdg_hrch_import_template;"
+    curs.execute(sql_stmt)
+
+    sql_stmt = f"""
+        insert into {table_nm} (
+            row_num,
+            file_name,
+            pvh_id,
+            pvl_seq,
+            pvl_id,
+            pg_nbr,
+            hdg_lvl,
+            detail_items_ind,
+            dup_pvl_id,
+            pvhh_id,
+            line_text,
+            indent
+        ) values (
+            %(row_num)s, 
+            %(file_name)s, 
+            %(pvh_id)s, 
+            %(pvl_seq)s, 
+            %(pvl_id)s, 
+            %(pg_nbr)s, 
+            %(hdg_lvl)s, 
+            %(detail_items_ind)s, 
+            %(dup_pvl_id)s, 
+            %(pvhh_id)s, 
+            %(line_text)s, 
+            %(indent)s
+        );
+    """
+
+    import_fn = export_dir + '/' + file_name
+    with open(import_fn, 'r') as fh:
+        fh.readline()
+        for line in fh:
+            row = line.strip('\n').split('\t')
+
+            detail_items_ind = row[7].upper() or None
+            if detail_items_ind == 'Y':
+                detail_items_ind = True
+            elif detail_items_ind == 'N':
+                detail_items_ind = False
+
+            params = {
+                'row_num': row[0],
+                'file_name': row[1],
+                'pvh_id': row[2],
+                'pvl_seq': row[3],
+                'pvl_id': row[4],
+                'pg_nbr': row[5],
+                'hdg_lvl': row[6] or None,
+                'detail_items_ind': detail_items_ind,
+                'dup_pvl_id': row[8] or None,
+                'pvhh_id': row[9] or None,
+                'line_text': row[10],
+                'indent': row[11] or None
+            }
+            curs.execute(sql_stmt, params)
+
+    sql_stmt = f"""
+        with base as (
+            select
+                pvl_id,
+                hdg_lvl,
+                row_num
+            from {table_nm}
+            where hdg_lvl is not null
+        ), candidates as (
+            select
+                b1.pvl_id,
+                ifnull(b2.pvl_id, 0) as cand_parent_pvl_id,
+                ifnull(b2.row_num, 0) as cand_parent_row_num
+            from base b1
+            left join base b2
+            on b2.row_num < b1.row_num and b2.hdg_lvl = b1.hdg_lvl - 1
+        ), parents as (
+            select distinct
+            pvl_id,
+            first_value(cand_parent_pvl_id) over (
+                partition by pvl_id order by cand_parent_row_num desc
+            ) as parent_pvl_id
+            from candidates
+        )
+        update {table_nm} t1
+        join parents t2 on t2.pvl_id = t1.pvl_id
+        set t1.parent_pvl_id = t2.parent_pvl_id;
+    """
+    curs.execute(sql_stmt)
+
+    db_conn.commit()
+
+    db_conn_slct = get_db_conn()
+    curs_slct = db_conn_slct.cursor(dictionary=True)
+
+    sql_stmt = f"""
+        select
+            t1.pvl_id,
+            t1.parent_pvl_id,
+            t1.hdg_lvl as hrch_lvl,
+            t1.line_text as heading_nm,
+            t1.detail_items_ind,
+            t2.fn_period
+        from {table_nm} t1
+        join previews_hdr t2 on t1.pvh_id = t2.pvh_id
+        where t1.pvhh_id is null
+        and t1.hdg_lvl is not null
+        order by t1.pvh_id, t1.pvl_seq;
+    """
+    curs_slct.execute(sql_stmt)
+
+    get_pvhh_seq_sql_stmt = "update pvhh_seq set id = last_insert_id(id + 1);"
+
+    lookup_pvhh_id_sql_stmt = """
+        select pvhh_id as parent_pvhh_id
+        from previews_hdg_hrch
+        where pvl_id = %(parent_pvl_id)s
+        and %(fn_period)s between valid_from and valid_to;
+    """
+
+    ins_hdg_hrch_sql_stmt = """
+        insert into previews_hdg_hrch (
+            pvhh_tid,
+            pvl_id,
+            pvhh_id,
+            parent_pvhh_id,
+            hrch_level,
+            heading_nm,
+            detail_items_ind,
+            valid_from,
+            valid_to
+        ) values (
+            DEFAULT,               -- auto increment
+            %(pvl_id)s,            -- from main select
+            %(pvhh_id)s,           -- from pvhh_seq table
+            %(parent_pvhh_id)s,    -- from separate lookup based on parent_pvl_id
+            %(hrch_lvl)s,          -- from main select
+            %(heading_nm)s,        -- from main select
+            %(detail_items_ind)s,  -- from main select
+            %(valid_from)s,        -- from main select
+            '9999-12-31'
+        );
+    """
+
+    for row in curs_slct:
+        curs.execute(get_pvhh_seq_sql_stmt)
+        pvhh_id = curs.lastrowid
+
+        if row['parent_pvl_id'] == 0:
+            parent_pvhh_id = 0
+        else:
+            params = {
+                'parent_pvl_id': row['parent_pvl_id'],
+                'fn_period': row['fn_period']
+            }
+            curs.execute(lookup_pvhh_id_sql_stmt, params)
+            parent_pvhh_id = curs.fetchone()[0]
+
+        params = {
+            'pvl_id': row['pvl_id'],
+            'pvhh_id': pvhh_id,
+            'parent_pvhh_id': parent_pvhh_id,
+            'hrch_lvl': row['hrch_lvl'],
+            'heading_nm': row['heading_nm'],
+            'detail_items_ind': row['detail_items_ind'],
+            'valid_from': row['fn_period']
+        }
+        curs.execute(ins_hdg_hrch_sql_stmt, params)
+
+    db_conn.commit()
+
+    curs.close()
+    curs_slct.close()
+    db_conn.close()
+    db_conn_slct.close()
+
+
 def db_tut():
     db_conn = mysql.connector.connect(user='root', password='dothedew', host='localhost', database='previews')
     curs = db_conn.cursor(dictionary=True)
@@ -571,4 +1014,6 @@ if __name__ == '__main__':
     # sys.exit(log_cof_files())
     # sys.exit(load_line())
     # sys.exit(set_pv_type())
-    sys.exit(set_page_nbr())
+    # sys.exit(set_page_nbr())
+    sys.exit(resolve_heading_hierarchy(1))
+    # sys.exit(import_hdg_hrch_lvls_file('hdg_hrch_export_0001_20200302220146.txt'))

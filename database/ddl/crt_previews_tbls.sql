@@ -1,4 +1,4 @@
-CREATE DATABASE `previews` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs */ /*!80016 DEFAULT ENCRYPTION='N' */;
+CREATE DATABASE `previews` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs */;
 
 use previews;
 
@@ -6,22 +6,27 @@ CREATE TABLE `hdg_hrch_import_template` (
   `row_num` int(11) NOT NULL,
   `file_name` varchar(25) COLLATE utf8mb4_0900_as_cs NOT NULL,
   `pvh_id` int(11) NOT NULL,
-  `pvl_id` int(11) NOT NULL,
   `pvl_seq` int(11) NOT NULL,
+  `pvl_id` int(11) NOT NULL,
+  `parent_pvl_id` int(11) DEFAULT NULL,
   `pg_nbr` int(11) NOT NULL,
   `hdg_lvl` int(11) DEFAULT NULL,
   `dup_pvl_id` int(11) DEFAULT NULL,
   `line_text` varchar(500) COLLATE utf8mb4_0900_as_cs NOT NULL,
   `indent` varchar(500) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
-  PRIMARY KEY (`pvh_id`,`row_num`)
+  PRIMARY KEY (`pvh_id`,`pvl_seq`),
+  UNIQUE KEY `hdg_hrch_import_1_1_pvl_id_uindex` (`pvl_id`),
+  UNIQUE KEY `hdg_hrch_import_1_1_row_num_uindex` (`row_num`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 CREATE TABLE `previews_hdg_hrch` (
   `pvhh_tid` int(11) NOT NULL AUTO_INCREMENT,
+  `pvl_id` int(11) NOT NULL,
   `pvhh_id` int(11) NOT NULL,
+  `parent_pvhh_id` int(11) DEFAULT NULL,
   `hrch_level` int(11) NOT NULL,
   `heading_nm` varchar(100) COLLATE utf8mb4_0900_as_cs NOT NULL,
-  `parent_pvhh_id` int(11) DEFAULT NULL,
+  `detail_items_ind` tinyint(1) NOT NULL,
   `valid_from` date NOT NULL,
   `valid_to` date NOT NULL,
   PRIMARY KEY (`pvhh_tid`),
@@ -61,4 +66,5 @@ CREATE TABLE `previews_lines` (
 CREATE TABLE `pvhh_seq` (
   `id` int(11) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
+
 
