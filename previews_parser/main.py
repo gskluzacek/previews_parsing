@@ -244,7 +244,7 @@ import mysql.connector
 #           - [h1_id] which will contain the PVHL_ID for the level 1 heading record
 
 # cof_dir = '/Users/gregskluzacek/Documents/Development/github_repos/previews_parsing/cof_files'
-cof_dir = '/Users/gskluzacek/Documents/GitHub/previews_parsing/cof_files'
+fn_path = '/Users/gskluzacek/Documents/GitHub/previews_parsing/cof_files'
 export_dir = '/Users/gskluzacek/Downloads/hdg_hrch_exports'
 
 
@@ -268,63 +268,72 @@ def log_cof_files() -> int:
     regex5 = r'^ISSUE #(\d\d\d) \(VOL\. (\d\d) #(\d\d?)\)$'
     cregex5 = re.compile(regex5)
 
-    cof_files, sorted_cof_file = get_cof_files_in_sorted_order(cof_dir)
+    # function returns
+    # a dictionary - key = file's date obj & key = cof file name
+    # a list - the list of the dictionary's keys in sorted order
+    fn_names, sorted_cof_file = get_cof_files_in_sorted_order(fn_path)
 
     db_conn = get_db_conn()
     db_conn.autocommit = True
     curs = db_conn.cursor(dictionary=True)
 
-    for cof_file in sorted_cof_file:
-        yr_nbr = cof_file.year
-        mo_nbr = cof_file.month
-        mo_str = cof_file.strftime('%b').upper()
-        ident_line = None
-        raw_ident = None
-        ident_str = None
+    # loop through the list of sorted cof file date objects
+    for fn_dt_obj in sorted_cof_file:
+
+        fn_yr_nbr = fn_dt_obj.year
+        fn_mo_nbr = fn_dt_obj.month
+        fn_mo_str = fn_dt_obj.strftime('%b').upper()
+        fn_vol_iss_nbr = fn_mo_nbr
+        fn_vol_nbr = fn_yr_nbr - 1990
+        fn_iss_nbr = (fn_vol_nbr - 1) * 12 + fn_vol_iss_nbr + 27
+
+        str_vol_iss_nbr = str(fn_mo_nbr).zfill(2)
+        fn_ident = f'PREVIEWS {fn_mo_str}-{fn_yr_nbr} ISSUE #{fn_iss_nbr} (VOL {fn_vol_nbr} #{str_vol_iss_nbr})'
+
+        txt_ident = None
+        txt_mo_str = None
+        txt_yr_nbr = None
+        txt_vol_iss_nbr = None
+        txt_vol_nbr = None
+        txt_iss_nbr = None
+        txt_dt_obj = None
+        txt_name = None
+
         try:
-            with open(cof_dir + '/' + cof_files[cof_file], 'r') as fh:
+            with open(fn_path + '/' + fn_names[fn_dt_obj], 'r') as fh:
                 for i, line in enumerate(fh, 1):
                     line = line.strip()
+
                     if line == 'PREVIEWS PUBLICATIONS':
-                        ident_typ = 40
-                        ident_line = i
-                        raw_ident = None
-                        id_mo = mo_str
-                        id_yr = str(yr_nbr)
-                        id_vol = str(yr_nbr - 1990)
-                        id_iss = str(mo_nbr).zfill(2)
-                        id_run_iss = (int(id_vol) - 1) * 12 + int(id_iss) + 27
-                        ident_str = f'PREVIEWS {id_mo}-{id_yr} ISSUE #{id_run_iss} (VOL {id_vol} #{id_iss})'
+                        ident_typ = 4
+                        ident_line_nbr = i * -1  # the line we found the first heading on
                         break
+
                     if line == 'PREVIEWS ORDER FORM':
                         line = fh.readline()
                         line = line.strip()
                         m = cregex3.fullmatch(line)
                         if m:
                             ident_typ = 20
-                            ident_line = i
-                            raw_ident = line
-                            id_mo = m.group(1)
-                            id_yr = yr_nbr
-                            id_vol = m.group(2)
-                            id_iss = m.group(3).zfill(2)
-                            id_run_iss = (int(id_vol) - 1) * 12 + int(id_iss) + 27
-                            ident_str = f'PREVIEWS {id_mo}-{id_yr} ISSUE #{id_run_iss} (VOL {id_vol} #{id_iss})'
+                            ident_line_nbr = i + 1
+                            txt_ident = line
+                            txt_mo_str = m.group(1)
+                            txt_vol_iss_nbr = m.group(3)
+                            txt_vol_nbr = m.group(2)
                         else:
                             ident_typ = 2
                         break
+
                     m = cregex1.fullmatch(line)
                     if m:
                         ident_typ = 10
-                        ident_line = i
-                        raw_ident = line
-                        id_mo = m.group(1)
-                        id_yr = yr_nbr
-                        id_vol = m.group(2)
-                        id_iss = m.group(3).zfill(2)
-                        id_run_iss = (int(id_vol) - 1) * 12 + int(id_iss) + 27
-                        ident_str = f'PREVIEWS {id_mo}-{id_yr} ISSUE #{id_run_iss} (VOL {id_vol} #{id_iss})'
+                        ident_line_nbr = i
+                        txt_ident = line
+                        txt_mo_str = m.group(1)
+                        txt_vol_iss_nbr = m.group(3)
+                        txt_vol_nbr = m.group(2)
                         break
+
                     m = cregex4.fullmatch(line)
                     if m:
                         line2 = fh.readline()
@@ -332,50 +341,88 @@ def log_cof_files() -> int:
                         m1 = cregex5.fullmatch(line2)
                         if m1:
                             ident_typ = 30
-                            ident_line = i
-                            raw_ident = line + '|' + line2
-                            id_mo = m.group(1)
-                            id_yr = m.group(2)
-                            id_run_iss = m1.group(1)
-                            id_vol = m1.group(2)
-                            id_iss = m1.group(3).zfill(2)
-                            ident_str = f'PREVIEWS {id_mo}-{id_yr} ISSUE #{id_run_iss} (VOL {id_vol} #{id_iss})'
+                            ident_line_nbr = i
+                            txt_ident = line + ' | ' + line2
+                            txt_mo_str = m.group(1).upper()
+                            txt_yr_nbr = m.group(2)
+                            txt_vol_iss_nbr = m1.group(3)
+                            txt_vol_nbr = m1.group(2)
+                            txt_iss_nbr = m1.group(1)
+                            txt_dt_obj = datetime.strptime(f'{txt_yr_nbr}-{txt_mo_str}-01', '%Y-%b-%d')
+                            txt_name = f'{txt_mo_str}{int(txt_yr_nbr)-2000}.txt'
                         else:
                             ident_typ = 3
                         break
-                print(f'{cof_files[cof_file]}\t{cof_file.strftime("%b-%Y")}\t{ident_typ}\t{ident_line}\t'
-                      f'{raw_ident}\t{ident_str}')
+
+                print(f'{fn_names[fn_dt_obj]}\t{fn_dt_obj.strftime("%b-%Y")}\t{ident_typ}\t{ident_line_nbr}\t'
+                      f'{txt_ident}\t{fn_ident}')
                 sql_stmt = """
-                    insert into previews_hdr values (
+                    insert into previews_hdr (
+                        pvh_id,
+                        ident_typ,
+                        ident_line,
+                        txt_ident,
+                        txt_mo,
+                        txt_yr,
+                        txt_volume,
+                        txt_vol_issue,
+                        txt_issue,
+                        txt_period,
+                        txt_name,
+                        fn_ident,
+                        fn_mo,
+                        fn_yr,
+                        fn_volume,
+                        fn_vol_issue,
+                        fn_issue,
+                        fn_period,
+                        fn_name,
+                        proc_sts,
+                        fn_path,
+                    ) values (
                         DEFAULT, 
                         %(ident_type)s, 
                         %(ident_line)s, 
-                        %(raw_indent)s, 
-                        %(ident_str)s, 
-                        %(ident_mo)s,
-                        %(ident_yr)s,
-                        %(running_issue)s,
-                        %(volume)s,
-                        %(issue)s,
+                        %(txt_ident)s, 
+                        %(txt_mo)s,
+                        %(txt_yr)s,
+                        %(txt_volume)s,
+                        %(txt_vol_issue)s,
+                        %(txt_issue)s,
+                        %(txt_period)s,
+                        %(txt_name)s,
+                        %(fn_ident)s,
+                        %(fn_mo)s,
+                        %(fn_yr)s,
+                        %(fn_volume)s,
+                        %(fn_vol_issue)s,
+                        %(fn_issue)s,
                         %(fn_period)s,
-                        %(file_name)s,
+                        %(fn_name)s,
                         'LOGGED',
-                        %(file_path)s
+                        %(fn_path)s
                     );
                 """
                 params = {
                     'ident_type': ident_typ,
-                    'ident_line': ident_line,
-                    'raw_indent': raw_ident,
-                    'ident_str': ident_str,
-                    'ident_mo': id_mo,
-                    'ident_yr': id_yr,
-                    'running_issue': id_run_iss,
-                    'volume': id_vol,
-                    'issue': id_iss,
-                    'fn_period': cof_file,
-                    'file_name': cof_files[cof_file],
-                    'file_path': cof_dir
+                    'ident_line': ident_line_nbr,
+                    'txt_ident': txt_ident,
+                    'txt_mo': txt_mo_str,
+                    'txt_yr': txt_yr_nbr,
+                    'txt_volume': txt_vol_nbr,
+                    'txt_vol_issue': txt_vol_iss_nbr,
+                    'txt_issue': txt_iss_nbr,
+                    'txt_period': txt_dt_obj,
+                    'txt_name': txt_name,
+                    'fn_ident': fn_ident,
+                    'fn_mo': fn_mo_str,
+                    'fn_yr': fn_yr_nbr,
+                    'fn_volume': fn_vol_nbr,
+                    'fn_vol_issue': fn_vol_iss_nbr,
+                    'fn_issue': fn_iss_nbr,
+                    'fn_period': fn_dt_obj,
+                    'fn_name': fn_names[fn_dt_obj],
+                    'fn_path': fn_path
                 }
                 try:
                     curs.execute(sql_stmt, params)
@@ -383,7 +430,7 @@ def log_cof_files() -> int:
                     print(f'error on insert {err}')
                     return -1
         except Exception as err:
-            print(f'got error on file {cof_files[cof_file]}')
+            print(f'got error on file {fn_names[fn_dt_obj]}')
             print(err)
     curs.close()
     db_conn.close()
@@ -391,6 +438,10 @@ def log_cof_files() -> int:
 
 
 def get_cof_files_in_sorted_order(cof_files_dir):
+    """
+    Reads the directory with the cof files and
+    returns a dict{date-obj: cof-file-nm} and sorted list of dict-key's (date-obj's)
+    """
     months = {
         'JAN': 1, 'FEB': 2, 'MAR': 3,
         'APR': 4, 'MAY': 5, 'JUN': 6,
@@ -410,6 +461,8 @@ def get_cof_files_in_sorted_order(cof_files_dir):
                         yr_nbr = 2000 + int(yr_str)
                         dt = date(yr_nbr, mo_nbr, 1)
                         cof_files[dt] = entry.name
+                    else:
+                        raise Exception(f'invalid year string {yr_str}')
                 else:
                     raise Exception(f'invalid month string {mo_str}')
     sorted_cof_file = sorted(cof_files.keys())
@@ -439,12 +492,12 @@ def load_line() -> int:
     db_conn = get_db_conn()
     curs = db_conn.cursor(dictionary=True)
     sql_stmt = """
-        select pvh_id, ident_str, file_path, file_name from previews_hdr where proc_sts = 'LOGGED' order by fn_period;
+        select pvh_id, fn_ident, fn_path, fn_name from previews_hdr where proc_sts = 'LOGGED' order by fn_period;
     """
     curs.execute(sql_stmt)
     for row in curs:
-        print(f'processing: {row["ident_str"]}, file: {row["file_name"]}')
-        with open(row['file_path'] + '/' + row['file_name']) as fh:
+        print(f'processing: {row["fn_ident"]}, file: {row["fn_name"]}')
+        with open(row['fn_path'] + '/' + row['fn_name']) as fh:
             try:
                 for pvl_seq, line in enumerate(fh, 1):
                     params = {
@@ -482,14 +535,14 @@ def get_encoding_type(current_file: str, detector: UniversalDetector):
 
 def convert_files_encoding() -> int:
     detector = UniversalDetector()
-    cof_files, sorted_cof_file = get_cof_files_in_sorted_order(cof_dir)
+    cof_files, sorted_cof_file = get_cof_files_in_sorted_order(fn_path)
     for cof_file in sorted_cof_file:
-        fn = cof_dir + '/' + cof_files[cof_file]
+        fn = fn_path + '/' + cof_files[cof_file]
         encoding = get_encoding_type(fn, detector)
         print(cof_files[cof_file], encoding)
         if encoding != 'utf-8':
             with codecs.open(fn, 'rU', encoding) as sourceFile:
-                with codecs.open(cof_dir + '/converted/' + cof_files[cof_file], 'w', 'utf-8') as targetFile:
+                with codecs.open(fn_path + '/converted/' + cof_files[cof_file], 'w', 'utf-8') as targetFile:
                     for line in sourceFile:
                         targetFile.write(line)
 
@@ -514,8 +567,8 @@ def set_pv_type() -> int:
                 pvh_id,
                 ident_line
             from previews_hdr
-            where ident_typ <> 40
-            and raw_ident is not null
+            where ident_typ <> 4
+            and txt_ident is not null
         ), 
         pv_type_calc as (
             select
@@ -800,7 +853,7 @@ def resolve_heading_hierarchy(pvh_id):
         )
         select
             t1.row_num - 1 as row_num,     -- A  A
-            t2.file_name,                  -- B  B
+            t2.fn_name,                  -- B  B
             t1.pvh_id,                     -- C  C
             t1.pvl_seq,                    -- D  E
             t1.pvl_id,                     -- E  D .
@@ -840,7 +893,7 @@ def resolve_heading_hierarchy(pvh_id):
     return 0
 
 
-def import_hdg_hrch_lvls_file(file_name):
+def import_hdg_hrch_lvls_file(fn_name):
     #
     # step 1 - read file and insert into the import table, eg: hdg_hrch_import__0001_20200302220146
     # step 2 - on the import table, set the parent_pvl_id
@@ -857,7 +910,7 @@ def import_hdg_hrch_lvls_file(file_name):
     db_conn = get_db_conn()
     curs = db_conn.cursor()
 
-    table_nm = f'hdg_hrch_import_{file_name[15:35]}'
+    table_nm = f'hdg_hrch_import_{fn_name[15:35]}'
 
     # drop the hdg_hrch_import_<pvh-id>_<dt-tm> if it exists (to make reprocessing easier)
     sql_stmt = f"drop table if exists {table_nm};"
@@ -875,7 +928,7 @@ def import_hdg_hrch_lvls_file(file_name):
     sql_stmt = f"""
         insert into {table_nm} (
             row_num,
-            file_name,
+            fn_name,
             pvh_id,
             pvl_seq,
             pvl_id,
@@ -888,7 +941,7 @@ def import_hdg_hrch_lvls_file(file_name):
             indent
         ) values (
             %(row_num)s, 
-            %(file_name)s, 
+            %(fn_name)s, 
             %(pvh_id)s, 
             %(pvl_seq)s, 
             %(pvl_id)s, 
@@ -903,7 +956,7 @@ def import_hdg_hrch_lvls_file(file_name):
     """
 
     # open the updated export file that will be loaded into the import table
-    import_fn = export_dir + '/' + file_name
+    import_fn = export_dir + '/' + fn_name
     with open(import_fn, 'r') as fh:
         fh.readline()
         for line in fh:
@@ -925,7 +978,7 @@ def import_hdg_hrch_lvls_file(file_name):
             # insert the line from the file to the hdg_hrch_import_<pvh-id>_<dt-tm> table
             params = {
                 'row_num': row[0],
-                'file_name': row[1],
+                'fn_name': row[1],
                 'pvh_id': row[2],
                 'pvl_seq': row[3],
                 'pvl_id': row[4],
