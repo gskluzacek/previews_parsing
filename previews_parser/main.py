@@ -420,7 +420,17 @@ def load_line() -> int:
     db_conn_wrk = get_db_conn()
     curs_wrk = db_conn_wrk.cursor()
     sql_stmt_ins = """
-        insert into previews_lines values (DEFAULT, %(pvh_id)s, %(pvl_seq)s, %(line_txt)s);
+        insert into previews_lines (
+            pvl_id,
+            pvh_id,
+            pvl_seq,
+            line_text            
+        ) values (
+            DEFAULT, 
+            %(pvh_id)s, 
+            %(pvl_seq)s, 
+            %(line_txt)s
+        );
     """
     sql_stmt_updt = """
         update previews_hdr set proc_sts = 'LOADED' where pvh_id = %(pvh_id)s;
@@ -440,7 +450,7 @@ def load_line() -> int:
                     params = {
                         'pvh_id': row["pvh_id"],
                         'pvl_seq': pvl_seq,
-                        'line_txt': line.strip()
+                        'line_txt': line.strip('\n')
                     }
                     curs_wrk.execute(sql_stmt_ins, params)
             except Exception as err:
@@ -631,6 +641,22 @@ def set_page_nbr():
 
 
 def resolve_heading_hierarchy(pvh_id):
+    # each time the previews_hdg_hrch table is updated with new hrch level numbers, we can re-run this
+    # function to validate that all headings in the previews_lines table are matched to a path in the
+    # previews_hdg_hrch table.
+    #
+    # step 1    - get the filename period for the given pvh_id
+    # step 2    - reset previously assigned pvhh_id's on the previews_lines table
+    # step 3    - execute driver query that selects the heading records from the previews_lines table
+    # step 4        - attempt to lookup the matching path for the "current headings state"
+    # step 5        - if not found, continue at the top of the loop
+    # step 6        - update the "current headings state" with the new heading
+    # step 7        - update the previews_lines record (pvl_id) for the matched path (pvhh_id)
+    # step 8    - check if there are any headings that have not been matched to a path
+    # step 9    - if all headings were matched then return
+    # step 10   - else extract the heading lines to a file, so unmatched headings can can be updated with level numbers
+    #
+
     db_conn = get_db_conn()
     curs_dict = db_conn.cursor(dictionary=True)
     curs = db_conn.cursor()
@@ -639,6 +665,7 @@ def resolve_heading_hierarchy(pvh_id):
     curs_dict_work = db_conn_work.cursor(dictionary=True)
     curs_work = db_conn_work.cursor()
 
+    # lookup the time period for the given pvh_id that is be processed
     sql_stmt = "select fn_period from previews_hdr where pvh_id = %(pvh_id)s;"
     params = {'pvh_id': pvh_id}
     curs_dict.execute(sql_stmt, params)
@@ -647,10 +674,12 @@ def resolve_heading_hierarchy(pvh_id):
         raise Exception(f'could not find file name period for pvh_id: {pvh_id}')
     fn_period = row['fn_period']
 
+    # on the previews_lines table, reset any previously assigned pvhh_id's
     sql_stmt = "update previews_lines set pvhh_id = NULL where pvh_id = %(pvh_id)s;"
     params = {'pvh_id': pvh_id}
     curs_dict_work.execute(sql_stmt, params)
 
+    # driver query, get the records to process in the loop from previews_lines table
     sql_stmt = """
         select
             pvl_id as curr_pvl_id,
@@ -663,6 +692,7 @@ def resolve_heading_hierarchy(pvh_id):
     params = {'pvh_id': pvh_id}
     curs.execute(sql_stmt, params)
 
+    # for each previews_lines record, attempt to lookup the matching path for the current headings state
     hrch_srch_stmt = """
         with recursive hrch (pvhh_id, heading_nm, hrch_level, path) as (
             select
@@ -693,6 +723,9 @@ def resolve_heading_hierarchy(pvh_id):
         limit 1;
     """
 
+    # if a matching path is found, then update the previews_lines record with the corresponding pvhh_id
+    updt_sql_stmt = "update previews_lines set pvhh_id = %(pvhh_id)s where pvl_id = %(curr_pvl_id)s;"
+
     curr_path = []
     curr_lvl = 0
     for curr_pvl_id, curr_hdg in curs:
@@ -721,15 +754,15 @@ def resolve_heading_hierarchy(pvh_id):
             curr_path = curr_path[:slice_index] + [curr_hdg]
         curr_lvl = hrch_lvl
 
-        sql_stmt = "update previews_lines set pvhh_id = %(pvhh_id)s where pvl_id = %(curr_pvl_id)s;"
         params = {'pvhh_id': pvhh_id, 'curr_pvl_id': curr_pvl_id}
-        curs_dict_work.execute(sql_stmt, params)
+        curs_dict_work.execute(updt_sql_stmt, params)
 
     db_conn_work.commit()
     curs_dict_work.close()
     curs_work.close()
     db_conn_work.close()
 
+    # check if there are any remaining heading lines that have not been matched to a path
     sql_stmt = """
         select count(1) as cnt 
         from previews_lines 
@@ -747,6 +780,7 @@ def resolve_heading_hierarchy(pvh_id):
         return 0
     print(f'{hdgs_not_found_count} heading were not found... generating extract file')
 
+    # query to extract the data to assign hrch hdg level numbers to unmatched headings
     sql_stmt = """
         with row_numbers as (
             select
@@ -801,21 +835,43 @@ def resolve_heading_hierarchy(pvh_id):
     curs.close()
     db_conn.close()
 
+    print(f'the name of the extract file is:\n{export_fn}')
+
     return 0
 
 
 def import_hdg_hrch_lvls_file(file_name):
+    #
+    # step 1 - read file and insert into the import table, eg: hdg_hrch_import__0001_20200302220146
+    # step 2 - on the import table, set the parent_pvl_id
+    # step 3 - populate the previews_hdg_hrch table
+    #           - for each rec in the import table
+    #           - get the next pvhh_id from the simulated sequence object
+    #           - lookup the corresponding parent_pvhh_id (previews_hdg_hrch) for the parent_pvl_id (import table)
+    #           - insert the date from the import table into the previews_hdg_hrch table
+    #
+    # if you want to reprocess a given file, you will need to delete the data for that file from the
+    #       previews_hdg_hrch table first. Else you'll bet some error like:
+    #       mysql.connector.errors.InternalError: Unread result found
+
     db_conn = get_db_conn()
     curs = db_conn.cursor()
 
     table_nm = f'hdg_hrch_import_{file_name[15:35]}'
 
+    # drop the hdg_hrch_import_<pvh-id>_<dt-tm> if it exists (to make reprocessing easier)
     sql_stmt = f"drop table if exists {table_nm};"
     curs.execute(sql_stmt)
 
+    # create hdg_hrch_import_<pvh-id>_<dt-tm>
     sql_stmt = f"create table {table_nm} like hdg_hrch_import_template;"
     curs.execute(sql_stmt)
 
+    #
+    # Step 1 open the updated export file and insert each line into the import table
+    #
+
+    # insert into the hdg_hrch_import_<pvh-id>_<dt-tm>
     sql_stmt = f"""
         insert into {table_nm} (
             row_num,
@@ -846,11 +902,19 @@ def import_hdg_hrch_lvls_file(file_name):
         );
     """
 
+    # open the updated export file that will be loaded into the import table
     import_fn = export_dir + '/' + file_name
     with open(import_fn, 'r') as fh:
         fh.readline()
         for line in fh:
             row = line.strip('\n').split('\t')
+
+            # the following is needed if using Excel to save the updated file
+            # as it will put quotes around a field if it contains a comma,
+            # even though the file is tab separated (TSV) and not comma separated (CSV)
+            if row[10][:1] == '"' and row[10][-1:] == '"' and ',' in row[10]:
+                row[10] = row[10][1:-1]
+                row[11] = row[11][1:-1]
 
             detail_items_ind = row[7].upper() or None
             if detail_items_ind == 'Y':
@@ -858,6 +922,7 @@ def import_hdg_hrch_lvls_file(file_name):
             elif detail_items_ind == 'N':
                 detail_items_ind = False
 
+            # insert the line from the file to the hdg_hrch_import_<pvh-id>_<dt-tm> table
             params = {
                 'row_num': row[0],
                 'file_name': row[1],
@@ -874,6 +939,11 @@ def import_hdg_hrch_lvls_file(file_name):
             }
             curs.execute(sql_stmt, params)
 
+    #
+    # Step 2 - set the parent column on the loaded export file
+    #
+
+    # SQL to update the parent_pvl_id (on the import table) based on the hdg_lvl and row_num
     sql_stmt = f"""
         with base as (
             select
@@ -909,6 +979,12 @@ def import_hdg_hrch_lvls_file(file_name):
     db_conn_slct = get_db_conn()
     curs_slct = db_conn_slct.cursor(dictionary=True)
 
+    #
+    # Step 3 - for each hdg_hrch_import record, look up the corresponding pvhh_id for the given pvl_id and insert
+    #           into the previews_hdg_hrch table
+    #
+
+    # select statement for the hdg_hrch_import_<pvh-id>_<dt-tm> table that gets the needed data
     sql_stmt = f"""
         select
             t1.pvl_id,
@@ -925,8 +1001,10 @@ def import_hdg_hrch_lvls_file(file_name):
     """
     curs_slct.execute(sql_stmt)
 
+    # sql statement that simulates a database sequence object (not available in MySQL)
     get_pvhh_seq_sql_stmt = "update pvhh_seq set id = last_insert_id(id + 1);"
 
+    # lookups the corresponding parent_pvhh_id on the previews_hdg_hrch table based on the parent_pvl_id on import table
     lookup_pvhh_id_sql_stmt = """
         select pvhh_id as parent_pvhh_id
         from previews_hdg_hrch
@@ -934,6 +1012,7 @@ def import_hdg_hrch_lvls_file(file_name):
         and %(fn_period)s between valid_from and valid_to;
     """
 
+    # insert statement for the previews_hdg_hrch table
     ins_hdg_hrch_sql_stmt = """
         insert into previews_hdg_hrch (
             pvhh_tid,
@@ -958,20 +1037,25 @@ def import_hdg_hrch_lvls_file(file_name):
         );
     """
 
+    # for each record in the hdg_hrch_import_<pvh-id>_<dt-tm> table
     for row in curs_slct:
+        # get the next sequence value
         curs.execute(get_pvhh_seq_sql_stmt)
         pvhh_id = curs.lastrowid
 
         if row['parent_pvl_id'] == 0:
+            # if the parent pvl id is 0, then the parent pvhh id will be 0
             parent_pvhh_id = 0
         else:
             params = {
                 'parent_pvl_id': row['parent_pvl_id'],
                 'fn_period': row['fn_period']
             }
+            # lookup the parent pvvh id based on the parent_pvl_id and period
             curs.execute(lookup_pvhh_id_sql_stmt, params)
             parent_pvhh_id = curs.fetchone()[0]
 
+        # insert the date into the previews_hdg_hrch (from the hdg_hrch_import_<pvh-id>_<dt-tm> table)
         params = {
             'pvl_id': row['pvl_id'],
             'pvhh_id': pvhh_id,
@@ -991,15 +1075,132 @@ def import_hdg_hrch_lvls_file(file_name):
     db_conn_slct.close()
 
 
-def db_tut():
-    db_conn = mysql.connector.connect(user='root', password='dothedew', host='localhost', database='previews')
-    curs = db_conn.cursor(dictionary=True)
-    curs.execute("UPDATE pvhh_seq SET id=LAST_INSERT_ID(id+1);")
-    pvhh_id = curs.lastrowid
-    print(pvhh_id)
-    db_conn.commit()
+def update_pv_item_lines_with_hhid():
+    sql_stmt = """
+        with
+        headings as (
+            select
+                pvh_id,
+                pvl_seq,
+                pvhh_id
+            from previews_lines
+            where pvh_id = 1
+            and pv_type = 'HDG'
+        ),
+        max_lines as (
+            select
+                pvh_id,
+                max(pvl_seq) as max_line
+            from previews_lines
+            group by pvh_id
+        ),
+        ranges as (
+            select * from (
+                select
+                    t1.pvh_id,
+                    t1.pvl_seq as start_line,
+                    ifnull(lead(t1.pvl_seq) over(order by t1.pvl_seq) - 1, t2.max_line)  as end_line,
+                    t1.pvhh_id
+                from headings as t1
+                join max_lines as t2 on t2.pvh_id = t1.pvh_id
+            ) t0 where end_line - start_line > 0
+        ),
+        calculated as (
+            select
+                t1.pvl_id,
+                t2.pvhh_id
+            from previews_lines as t1
+            join ranges as t2
+            on t1.pvh_id = t2.pvh_id
+            and t1.pvl_seq between t2.start_line + 1 and t2.end_line
+        )
+        update previews_lines t1
+        join calculated t2
+        on t2.pvl_id = t1.pvl_id
+        set t1.pvhh_id = t2.pvhh_id
+        where t1.pv_type = 'ITEM';
+    """
+    print(sql_stmt)
+
+
+def explode_line_text():
+    db_conn = get_db_conn()
+    curs = db_conn.cursor()
+
+    db_conn_work = get_db_conn()
+    curs_work = db_conn_work.cursor()
+
+    sql_stmt = "select pvl_id, line_text from previews_lines where pv_type = 'ITEM' order by pvh_id, pvl_seq;"
+
+    insrt_sql_stmt = """
+        insert into previews_basic_dtl (
+            pvb_id,
+            pvl_id,
+            promo_cd,
+            sol_code,
+            sol_text,
+            release_dt,
+            unit_price_raw        
+        ) values (
+            DEFAULT,
+            %(pvl_id)s,
+            %(promo_cd)s,
+            %(sol_code)s,
+            %(sol_text)s,
+            %(release_dt)s,
+            %(unit_price_raw)s
+        );
+    """
+
+    curs.execute(sql_stmt)
+    for pvl_id, line_txt in curs:
+        try:
+            fields = line_txt.split('\t')
+
+            # due to an error on diamonds part, there are some months where there is an extra blank field
+            # between the sol-code and sol-text fields, we need to remove it.
+            if len(fields) > 7:
+                fields = fields[:2] + fields[3:]
+
+            # apparently, diamond forgets to put in the release date column for some items, so we need to add
+            # a blank release date field for these lines.
+            if len(fields) == 6 and ('$' in fields[3] or 'PI' in fields[3]):
+                fields = fields[:3] + [''] + fields[4:]
+
+            if len(fields) >= 4:
+                promo_cd = fields[0] if len(fields[0]) != 0 else None
+                sol_code = fields[1][:5] + fields[1][6:]
+                sol_text = fields[2]
+                if len(fields[3]) != 0:
+                    release_dt = f'20{fields[3][6:]}-{fields[3][:2]}-{fields[3][3:5]}'
+                else:
+                    release_dt = None
+                unit_price_raw = fields[4] if len(fields[4]) != 0 else None
+            else:
+                print(f'malformed item line text {pvl_id}')
+                for i, f in enumerate(fields, 1):
+                    print(f'\t[{i}  {f}')
+                continue
+
+            params = {
+                'pvl_id': pvl_id,
+                'promo_cd': promo_cd,
+                'sol_code': sol_code,
+                'sol_text': sol_text,
+                'release_dt': release_dt,
+                'unit_price_raw': unit_price_raw
+            }
+            curs_work.execute(insrt_sql_stmt, params)
+        except Exception as err:
+            print(err)
+            raise
+
+    db_conn_work.commit()
+
     curs.close()
+    curs_work.close()
     db_conn.close()
+    db_conn_work.close()
 
 
 def get_db_conn() -> mysql.connector:
@@ -1009,11 +1210,50 @@ def get_db_conn() -> mysql.connector:
     return db_conn
 
 
+def pivot_pv_type_counts():
+    sql = """
+        with counts as (
+            select 
+                pvh_id, 
+                pv_type, 
+                count(1) as cnt 
+            from previews_lines 
+            group by pvh_id, pv_type
+        )
+        select pvh_id,
+            MAX(case pv_type when 'IDENT'  then cnt else null end) as IDENT,
+            MAX(case pv_type when 'HDG'    then cnt else null end) as HDG,
+            MAX(case pv_type when 'PAGE'   then cnt else null end) as PAGE,
+            MAX(case pv_type when 'ITEM'   then cnt else null end) as ITEM,
+            MAX(case pv_type when 'BLANK'  then cnt else null end) as BLANK,
+            MAX(case pv_type when 'JUNK'   then cnt else null end) as JUNK
+        from counts
+        group by pvh_id
+        order by pvh_id;
+    """
+    print(sql)
+
+
 if __name__ == '__main__':
     # sys.exit(convert_files_encoding())
-    # sys.exit(log_cof_files())
-    # sys.exit(load_line())
-    # sys.exit(set_pv_type())
-    # sys.exit(set_page_nbr())
-    sys.exit(resolve_heading_hierarchy(1))
-    # sys.exit(import_hdg_hrch_lvls_file('hdg_hrch_export_0001_20200302220146.txt'))
+    # t0 = datetime.now()
+    # log_cof_files()
+    # t1 = datetime.now()
+    # print(f'log_cof_files completed: {t1 - t0}')
+    # load_line()
+    # t2 = datetime.now()
+    # print(f'load_line completed: {t2 - t1}')
+    # set_pv_type()
+    # t3 = datetime.now()
+    # print(f'set_pv_type completed: {t3 - t2}')
+    # set_page_nbr()
+    # t4 = datetime.now()
+    # print(f'set_page_nbr completed: {t4 - t3}')
+    # resolve_heading_hierarchy(1)
+    # t5 = datetime.now()
+    # print(f'resolve_heading_hierarchy completed: {t5 - t4}')
+    # import_hdg_hrch_lvls_file('hdg_hrch_export_0001_20200305203825.txt')
+    # t6 = datetime.now()
+    # print(f'import_hdg_hrch_lvls_file completed: {t6 - t5}')
+    explode_line_text()
+    sys.exit(0)

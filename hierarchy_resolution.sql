@@ -108,7 +108,7 @@ with row_numbers as (
 )
 select
     t1.row_num - 1 as row_num,     -- A  A
-    t2.file_name,                  -- B  B
+    t2.fn_name,                  -- B  B
     t1.pvh_id,                     -- C  C
     t1.pvl_seq,                    -- D  E
     t1.pvl_id,                     -- E  D .

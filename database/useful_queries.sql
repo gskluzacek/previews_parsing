@@ -1,10 +1,10 @@
-select t3.file_name, t1.*
+select t3.fn_name, t1.*
 from previews_lines t1
 join previews_hdr t3 on t3.pvh_id = t1.pvh_id
 left join (
     select *
     from previews_hdr
-    where ident_typ <> 40 and raw_ident is not null
+    where ident_typ <> 40 and txt_ident is not null
 ) t2
 on t2.pvh_id = t1.pvh_id and t2.ident_line = t1.pvl_seq
 where t2.pvh_id is null

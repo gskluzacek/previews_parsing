@@ -1,4 +1,4 @@
-CREATE DATABASE `previews` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs */;
+CREATE DATABASE if not exists `previews` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs */;
 
 use previews;
 
@@ -11,7 +11,9 @@ CREATE TABLE `hdg_hrch_import_template` (
   `parent_pvl_id` int(11) DEFAULT NULL,
   `pg_nbr` int(11) NOT NULL,
   `hdg_lvl` int(11) DEFAULT NULL,
+  `detail_items_ind` tinyint(1) DEFAULT NULL,
   `dup_pvl_id` int(11) DEFAULT NULL,
+  `pvhh_id` int(11) DEFAULT NULL,
   `line_text` varchar(500) COLLATE utf8mb4_0900_as_cs NOT NULL,
   `indent` varchar(500) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
   PRIMARY KEY (`pvh_id`,`pvl_seq`),
@@ -50,7 +52,7 @@ CREATE TABLE `previews_hdr` (
   `file_path` varchar(500) COLLATE utf8mb4_0900_as_cs NOT NULL,
   PRIMARY KEY (`pvh_id`),
   UNIQUE KEY `previews_hdr_file_name_uindex` (`file_name`)
-) ENGINE=InnoDB AUTO_INCREMENT=136 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 CREATE TABLE `previews_lines` (
   `pvl_id` bigint(20) NOT NULL AUTO_INCREMENT,
@@ -58,13 +60,14 @@ CREATE TABLE `previews_lines` (
   `pvl_seq` int(11) NOT NULL,
   `pv_type` varchar(50) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
   `pg_nbr` int(11) DEFAULT NULL,
+  `pvhh_id` int(11) DEFAULT NULL,
   `line_text` varchar(1000) COLLATE utf8mb4_0900_as_cs NOT NULL,
   PRIMARY KEY (`pvl_id`),
   UNIQUE KEY `previews_lines_pvh_id_pvl_seq_uindex` (`pvh_id`,`pvl_seq`)
-) ENGINE=InnoDB AUTO_INCREMENT=436822 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
 CREATE TABLE `pvhh_seq` (
   `id` int(11) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;
 
-
+insert into pvhh_seq values(0);
