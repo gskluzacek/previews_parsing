@@ -256,6 +256,85 @@ def main():
             print(fields)
 
 
+def init_txt_params(line_nbr):
+    params = {
+        'ident_line': line_nbr,
+        'txt_ident': None,
+        'txt_mo': None,
+        'txt_yr': None,
+        'txt_volume': None,
+        'txt_vol_issue': None,
+        'txt_issue': None,
+        'txt_period': None,
+        'txt_name': None
+    }
+    return params
+
+
+def missing_ident_line(line_nbr):
+    params = init_txt_params(line_nbr * -1)
+    updt_params = {
+        'ident_type': 4
+    }
+    params.update(updt_params)
+    return params
+
+
+def terse_ident_line_with_ind_line(line_nbr, match, txt_ident):
+    params = init_txt_params(line_nbr + 1)
+    if match:
+        updt_params = {
+            'ident_type': 20,
+            'txt_ident': txt_ident,
+            'txt_mo': match.group(1),
+            'txt_volume': match.group(2),
+            'txt_vol_issue': match.group(3)
+        }
+    else:
+        updt_params = {
+            'ident_type': 2
+        }
+    params.update(updt_params)
+    return params
+
+
+def basic_ident_line(line_nbr, match, txt_ident):
+    params = init_txt_params(line_nbr)
+    updt_params = {
+        'ident_type': 10,
+        'txt_ident': txt_ident,
+        'txt_mo': match.group(1),
+        'txt_volume': match.group(2),
+        'txt_vol_issue': match.group(3)
+    }
+    params.update(updt_params)
+    return params
+
+
+def advanced_ident_line(line_nbr, match_1, match_2, txt_ident_1, txt_ident_2):
+    params = init_txt_params(line_nbr)
+    if match_2:
+        txt_mo_str = match_1.group(1).upper()
+        txt_yr_nbr = match_1.group(2)
+        updt_params = {
+            'ident_type': 30,
+            'txt_ident': txt_ident_1 + ' | ' + txt_ident_2,
+            'txt_mo': txt_mo_str,
+            'txt_yr': txt_yr_nbr,
+            'txt_volume': match_2.group(2),
+            'txt_vol_issue': match_2.group(3),
+            'txt_issue': match_2.group(1),
+            'txt_period': datetime.strptime(f'{txt_yr_nbr}-{txt_mo_str}-01', '%Y-%b-%d'),
+            'txt_name': f'{txt_mo_str}{int(txt_yr_nbr) - 2000}.txt',
+        }
+    else:
+        updt_params = {
+            'ident_type': 3
+        }
+    params.update(updt_params)
+    return params
+
+
 def log_cof_files() -> int:
     regex1 = r'^PREVIEWS (JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC).* V(?:OL)?\.? ?(\d\d) #(\d\d?)$'
     cregex1 = re.compile(regex1)
@@ -277,6 +356,57 @@ def log_cof_files() -> int:
     db_conn.autocommit = True
     curs = db_conn.cursor(dictionary=True)
 
+    sql_stmt = "truncate table previews_hdr;"
+    curs.execute(sql_stmt)
+
+    sql_stmt = """
+        insert into previews_hdr (
+            pvh_id,
+            ident_typ,
+            ident_line,
+            txt_ident,
+            txt_mo,
+            txt_yr,
+            txt_volume,
+            txt_vol_issue,
+            txt_issue,
+            txt_period,
+            txt_name,
+            fn_ident,
+            fn_mo,
+            fn_yr,
+            fn_volume,
+            fn_vol_issue,
+            fn_issue,
+            fn_period,
+            fn_name,
+            proc_sts,
+            fn_path
+        ) values (
+            DEFAULT, 
+            %(ident_type)s, 
+            %(ident_line)s, 
+            %(txt_ident)s, 
+            %(txt_mo)s,
+            %(txt_yr)s,
+            %(txt_volume)s,
+            %(txt_vol_issue)s,
+            %(txt_issue)s,
+            %(txt_period)s,
+            %(txt_name)s,
+            %(fn_ident)s,
+            %(fn_mo)s,
+            %(fn_yr)s,
+            %(fn_volume)s,
+            %(fn_vol_issue)s,
+            %(fn_issue)s,
+            %(fn_period)s,
+            %(fn_name)s,
+            'LOGGED',
+            %(fn_path)s
+        );
+    """
+
     # loop through the list of sorted cof file date objects
     for fn_dt_obj in sorted_cof_file:
 
@@ -290,130 +420,52 @@ def log_cof_files() -> int:
         str_vol_iss_nbr = str(fn_mo_nbr).zfill(2)
         fn_ident = f'PREVIEWS {fn_mo_str}-{fn_yr_nbr} ISSUE #{fn_iss_nbr} (VOL {fn_vol_nbr} #{str_vol_iss_nbr})'
 
-        txt_ident = None
-        txt_mo_str = None
-        txt_yr_nbr = None
-        txt_vol_iss_nbr = None
-        txt_vol_nbr = None
-        txt_iss_nbr = None
-        txt_dt_obj = None
-        txt_name = None
-
         try:
+            # open the cof file
             with open(fn_path + '/' + fn_names[fn_dt_obj], 'r') as fh:
+                # keep reading the cof file until we determine what type of IDENT line it has
+                #   - missing IDENT line
+                #   - terse IDENT line
+                #   - basic IDENT line
+                #   - advanceed IDENT line
                 for i, line in enumerate(fh, 1):
                     line = line.strip()
 
+                    # check if we've hit the first head of the file which is always: PREVIEWS PUBLICATIONS
                     if line == 'PREVIEWS PUBLICATIONS':
-                        ident_typ = 4
-                        ident_line_nbr = i * -1  # the line we found the first heading on
+                        txt_params = missing_ident_line(i)
                         break
 
+                    # check if matches the ``ident line label`` which indicates the next line is the IDENT line
                     if line == 'PREVIEWS ORDER FORM':
+                        # get the next line
                         line = fh.readline()
                         line = line.strip()
+                        # attempt to get the regex match object on the TERSE IDENT line
                         m = cregex3.fullmatch(line)
-                        if m:
-                            ident_typ = 20
-                            ident_line_nbr = i + 1
-                            txt_ident = line
-                            txt_mo_str = m.group(1)
-                            txt_vol_iss_nbr = m.group(3)
-                            txt_vol_nbr = m.group(2)
-                        else:
-                            ident_typ = 2
+
+                        txt_params = terse_ident_line_with_ind_line(i, m, line)
                         break
 
+                    # if if the regex matches the BASIC IDENT line
                     m = cregex1.fullmatch(line)
                     if m:
-                        ident_typ = 10
-                        ident_line_nbr = i
-                        txt_ident = line
-                        txt_mo_str = m.group(1)
-                        txt_vol_iss_nbr = m.group(3)
-                        txt_vol_nbr = m.group(2)
+                        txt_params = basic_ident_line(i, m, line)
                         break
 
+                    # if if the regex matches the 1st of 2 ADVANCED IDENT lines
                     m = cregex4.fullmatch(line)
                     if m:
+                        # 1st of 2 matched, get the next line
                         line2 = fh.readline()
                         line2 = line2.strip()
+                        # attempt to get the regex match object on the 2nd of 2 ADVANCED IDENT lines
                         m1 = cregex5.fullmatch(line2)
-                        if m1:
-                            ident_typ = 30
-                            ident_line_nbr = i
-                            txt_ident = line + ' | ' + line2
-                            txt_mo_str = m.group(1).upper()
-                            txt_yr_nbr = m.group(2)
-                            txt_vol_iss_nbr = m1.group(3)
-                            txt_vol_nbr = m1.group(2)
-                            txt_iss_nbr = m1.group(1)
-                            txt_dt_obj = datetime.strptime(f'{txt_yr_nbr}-{txt_mo_str}-01', '%Y-%b-%d')
-                            txt_name = f'{txt_mo_str}{int(txt_yr_nbr)-2000}.txt'
-                        else:
-                            ident_typ = 3
+
+                        txt_params = advanced_ident_line(i, m, m1, line, line2)
                         break
 
-                print(f'{fn_names[fn_dt_obj]}\t{fn_dt_obj.strftime("%b-%Y")}\t{ident_typ}\t{ident_line_nbr}\t'
-                      f'{txt_ident}\t{fn_ident}')
-                sql_stmt = """
-                    insert into previews_hdr (
-                        pvh_id,
-                        ident_typ,
-                        ident_line,
-                        txt_ident,
-                        txt_mo,
-                        txt_yr,
-                        txt_volume,
-                        txt_vol_issue,
-                        txt_issue,
-                        txt_period,
-                        txt_name,
-                        fn_ident,
-                        fn_mo,
-                        fn_yr,
-                        fn_volume,
-                        fn_vol_issue,
-                        fn_issue,
-                        fn_period,
-                        fn_name,
-                        proc_sts,
-                        fn_path,
-                    ) values (
-                        DEFAULT, 
-                        %(ident_type)s, 
-                        %(ident_line)s, 
-                        %(txt_ident)s, 
-                        %(txt_mo)s,
-                        %(txt_yr)s,
-                        %(txt_volume)s,
-                        %(txt_vol_issue)s,
-                        %(txt_issue)s,
-                        %(txt_period)s,
-                        %(txt_name)s,
-                        %(fn_ident)s,
-                        %(fn_mo)s,
-                        %(fn_yr)s,
-                        %(fn_volume)s,
-                        %(fn_vol_issue)s,
-                        %(fn_issue)s,
-                        %(fn_period)s,
-                        %(fn_name)s,
-                        'LOGGED',
-                        %(fn_path)s
-                    );
-                """
                 params = {
-                    'ident_type': ident_typ,
-                    'ident_line': ident_line_nbr,
-                    'txt_ident': txt_ident,
-                    'txt_mo': txt_mo_str,
-                    'txt_yr': txt_yr_nbr,
-                    'txt_volume': txt_vol_nbr,
-                    'txt_vol_issue': txt_vol_iss_nbr,
-                    'txt_issue': txt_iss_nbr,
-                    'txt_period': txt_dt_obj,
-                    'txt_name': txt_name,
                     'fn_ident': fn_ident,
                     'fn_mo': fn_mo_str,
                     'fn_yr': fn_yr_nbr,
@@ -424,11 +476,16 @@ def log_cof_files() -> int:
                     'fn_name': fn_names[fn_dt_obj],
                     'fn_path': fn_path
                 }
+                params.update(txt_params)
+
                 try:
                     curs.execute(sql_stmt, params)
                 except Exception as err:
                     print(f'error on insert {err}')
-                    return -1
+
+                print(f'{fn_names[fn_dt_obj]}\t{fn_dt_obj.strftime("%b-%Y")}\t{params["ident_type"]}\t'
+                      f'{params["ident_line"]}\t{params["txt_ident"]}\t{fn_ident}')
+
         except Exception as err:
             print(f'got error on file {fn_names[fn_dt_obj]}')
             print(err)
@@ -1287,12 +1344,25 @@ def pivot_pv_type_counts():
     print(sql)
 
 
+def list_txt_fn_inconsistencies():
+    sql_stmts = """
+        select * from previews_hdr where txt_mo is null or txt_mo <> fn_mo order by fn_period;
+        select * from previews_hdr where txt_yr <> fn_yr order by fn_period;
+        select * from previews_hdr where txt_volume <> fn_volume order by fn_period;
+        select * from previews_hdr where txt_vol_issue <> fn_vol_issue order by fn_period;
+        select * from previews_hdr where txt_issue <> fn_issue order by fn_period;
+        select * from previews_hdr where txt_period <> fn_period order by fn_period;
+        select * from previews_hdr where txt_name <> fn_name order by fn_period;
+    """
+    print(sql_stmts)
+
+
 if __name__ == '__main__':
     # sys.exit(convert_files_encoding())
-    # t0 = datetime.now()
-    # log_cof_files()
-    # t1 = datetime.now()
-    # print(f'log_cof_files completed: {t1 - t0}')
+    t0 = datetime.now()
+    log_cof_files()
+    t1 = datetime.now()
+    print(f'log_cof_files completed: {t1 - t0}')
     # load_line()
     # t2 = datetime.now()
     # print(f'load_line completed: {t2 - t1}')
@@ -1308,5 +1378,5 @@ if __name__ == '__main__':
     # import_hdg_hrch_lvls_file('hdg_hrch_export_0001_20200305203825.txt')
     # t6 = datetime.now()
     # print(f'import_hdg_hrch_lvls_file completed: {t6 - t5}')
-    explode_line_text()
+    # explode_line_text()
     sys.exit(0)
