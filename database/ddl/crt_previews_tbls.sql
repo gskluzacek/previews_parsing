@@ -4,7 +4,7 @@ use previews;
 
 CREATE TABLE `hdg_hrch_import_template` (
   `row_num` int(11) NOT NULL,
-  `file_name` varchar(25) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL,
+  `fn_name` varchar(25) COLLATE utf8mb4_0900_as_cs NOT NULL,
   `pvh_id` int(11) NOT NULL,
   `pvl_seq` int(11) NOT NULL,
   `pvl_id` int(11) NOT NULL,
@@ -24,11 +24,13 @@ CREATE TABLE `hdg_hrch_import_template` (
 CREATE TABLE `previews_basic_dtl` (
   `pvb_id` bigint(20) NOT NULL AUTO_INCREMENT,
   `pvl_id` bigint(20) NOT NULL,
-  `promo_cd` varchar(15) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
-  `sol_code` varchar(10) COLLATE utf8mb4_0900_as_cs NOT NULL COMMENT 'there should be no spaces in the value',
-  `sol_text` varchar(300) COLLATE utf8mb4_0900_as_cs NOT NULL,
+  `promo_cd` varchar(15) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
+  `sol_code` varchar(15) COLLATE utf8mb4_0900_as_cs NOT NULL COMMENT 'there should be no spaces in the value',
+  `sol_text` varchar(300) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL,
   `release_dt` date DEFAULT NULL,
-  `unit_price_raw` varchar(50) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
+  `price_type` varchar(10) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
+  `unit_price` decimal(8,2) DEFAULT NULL,
+  `price_ind` varchar(10) COLLATE utf8mb4_0900_as_cs DEFAULT NULL,
   PRIMARY KEY (`pvb_id`),
   UNIQUE KEY `previews_basic_dtl_pvl_id_uindex` (`pvl_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_as_cs;

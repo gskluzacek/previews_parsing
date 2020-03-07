@@ -529,6 +529,10 @@ def get_cof_files_in_sorted_order(cof_files_dir):
 def load_line() -> int:
     db_conn_wrk = get_db_conn()
     curs_wrk = db_conn_wrk.cursor()
+
+    sql_stmt = "truncate table previews_lines;"
+    curs_wrk.execute(sql_stmt)
+
     sql_stmt_ins = """
         insert into previews_lines (
             pvl_id,
@@ -632,11 +636,11 @@ def set_pv_type() -> int:
                 t1.pvl_id,
                 t1.pvh_id,
                 case
-                    when t4.pvh_id is not null         then 'IDENT'
-                    when t1.line_text = ''             then 'BLANK'
-                    when t1.line_text like '%\t%\t%'   then 'ITEM'
-                    when t1.line_text like 'PAGE%'     then 'PAGE'
-                    when t1.pvl_seq > t3.last_item_seq then 'JUNK'
+                    when t4.pvh_id is not null                         then 'IDENT'
+                    when trim('\t' from t1.line_text) = ''             then 'BLANK'
+                    when trim('\t' from t1.line_text) like '%\t%\t%'   then 'ITEM'
+                    when trim('\t' from t1.line_text) like 'PAGE%'     then 'PAGE'
+                    when t1.pvl_seq > t3.last_item_seq                 then 'JUNK'
                     else 'HDG'
                 end as pv_type_calced,
                 t2.proc_sts
@@ -760,7 +764,7 @@ def resolve_heading_hierarchy(pvh_id):
     # step 3    - execute driver query that selects the heading records from the previews_lines table
     # step 4        - attempt to lookup the matching path for the "current headings state"
     # step 5        - if not found, continue at the top of the loop
-    # step 6        - update the "current headings state" with the new heading
+    # step 6        - refresh the "current headings state" with the new heading
     # step 7        - update the previews_lines record (pvl_id) for the matched path (pvhh_id)
     # step 8    - check if there are any headings that have not been matched to a path
     # step 9    - if all headings were matched then return
@@ -1185,7 +1189,10 @@ def import_hdg_hrch_lvls_file(fn_name):
     db_conn_slct.close()
 
 
-def update_pv_item_lines_with_hhid():
+def update_pv_item_lines_with_hhid(pvh_id):
+    db_conn = get_db_conn()
+    curs = db_conn.cursor()
+
     sql_stmt = """
         with
         headings as (
@@ -1194,7 +1201,7 @@ def update_pv_item_lines_with_hhid():
                 pvl_seq,
                 pvhh_id
             from previews_lines
-            where pvh_id = 1
+            where pvh_id = %(pvh_id)s
             and pv_type = 'HDG'
         ),
         max_lines as (
@@ -1202,6 +1209,7 @@ def update_pv_item_lines_with_hhid():
                 pvh_id,
                 max(pvl_seq) as max_line
             from previews_lines
+            where pvh_id = %(pvh_id)s
             group by pvh_id
         ),
         ranges as (
@@ -1230,7 +1238,12 @@ def update_pv_item_lines_with_hhid():
         set t1.pvhh_id = t2.pvhh_id
         where t1.pv_type = 'ITEM';
     """
-    print(sql_stmt)
+    params = {'pvh_id': pvh_id}
+    curs.execute(sql_stmt, params)
+
+    db_conn.commit()
+    curs.close()
+    db_conn.close()
 
 
 def explode_line_text():
@@ -1250,7 +1263,9 @@ def explode_line_text():
             sol_code,
             sol_text,
             release_dt,
-            unit_price_raw        
+            price_type,
+            unit_price,
+            price_ind
         ) values (
             DEFAULT,
             %(pvl_id)s,
@@ -1258,7 +1273,9 @@ def explode_line_text():
             %(sol_code)s,
             %(sol_text)s,
             %(release_dt)s,
-            %(unit_price_raw)s
+            %(price_type)s,
+            %(unit_price)s,
+            %(price_ind)s
         );
     """
 
@@ -1275,17 +1292,54 @@ def explode_line_text():
             # apparently, diamond forgets to put in the release date column for some items, so we need to add
             # a blank release date field for these lines.
             if len(fields) == 6 and ('$' in fields[3] or 'PI' in fields[3]):
-                fields = fields[:3] + [''] + fields[4:]
+                fields = fields[:3] + [''] + fields[3:]
 
             if len(fields) >= 4:
-                promo_cd = fields[0] if len(fields[0]) != 0 else None
-                sol_code = fields[1][:5] + fields[1][6:]
+                promo_cd = fields[0].strip() or None
+                sol_code = fields[1].strip()
+                if sol_code[6] == ' ':
+                    sol_code = sol_code[:5] + sol_code[6:]
                 sol_text = fields[2]
-                if len(fields[3]) != 0:
-                    release_dt = f'20{fields[3][6:]}-{fields[3][:2]}-{fields[3][3:5]}'
+
+                release_dt = fields[3].strip() or None
+                if release_dt:
+                    mon, day, year = fields[3].split('/')
+                    # could have either 2 or 4 digit year
+                    dt_year = f'20{year}' if len(year) == 2 else year
+                    # could have either 1 or 2 digit month or day
+                    dt_mon = mon.zfill(2)
+                    dt_day = day.zfill(2)
+                    release_dt = f'{dt_year}-{dt_mon}-{dt_day}'
+
+                unit_price_raw = fields[4].strip().upper() or None
+
+                if unit_price_raw.startswith('MSRP:'):
+                    price_type = 'MSRP'
+                elif unit_price_raw.startswith('SRP:'):
+                    price_type = 'SRP'
+                elif unit_price_raw.startswith('$'):
+                    price_type = 'NONE'
+                elif unit_price_raw is None:
+                    price_type = 'N/A'
                 else:
-                    release_dt = None
-                unit_price_raw = fields[4] if len(fields[4]) != 0 else None
+                    price_type = 'UNKNOWN'
+
+                if unit_price_raw.startswith('MSRP: $'):
+                    unit_price = unit_price_raw[7:]
+                elif unit_price_raw.startswith('SRP: $'):
+                    unit_price = unit_price_raw[6:]
+                elif unit_price_raw.startswith('$'):
+                    unit_price = unit_price_raw[1:]
+                else:
+                    unit_price = None
+
+                if unit_price_raw.endswith('PI'):
+                    price_ind = 'PI'
+                elif unit_price_raw.endswith('FREE'):
+                    price_ind = 'FREE'
+                else:
+                    price_ind = None
+
             else:
                 print(f'malformed item line text {pvl_id}')
                 for i, f in enumerate(fields, 1):
@@ -1298,7 +1352,9 @@ def explode_line_text():
                 'sol_code': sol_code,
                 'sol_text': sol_text,
                 'release_dt': release_dt,
-                'unit_price_raw': unit_price_raw
+                'price_type': price_type,
+                'unit_price': unit_price,
+                'price_ind': price_ind
             }
             curs_work.execute(insrt_sql_stmt, params)
         except Exception as err:
@@ -1359,10 +1415,10 @@ def list_txt_fn_inconsistencies():
 
 if __name__ == '__main__':
     # sys.exit(convert_files_encoding())
-    t0 = datetime.now()
-    log_cof_files()
-    t1 = datetime.now()
-    print(f'log_cof_files completed: {t1 - t0}')
+    # t0 = datetime.now()
+    # log_cof_files()
+    # t1 = datetime.now()
+    # print(f'log_cof_files completed: {t1 - t0}')
     # load_line()
     # t2 = datetime.now()
     # print(f'load_line completed: {t2 - t1}')
@@ -1378,5 +1434,6 @@ if __name__ == '__main__':
     # import_hdg_hrch_lvls_file('hdg_hrch_export_0001_20200305203825.txt')
     # t6 = datetime.now()
     # print(f'import_hdg_hrch_lvls_file completed: {t6 - t5}')
-    # explode_line_text()
+    # update_pv_item_lines_with_hhid(1)
+    explode_line_text()
     sys.exit(0)
